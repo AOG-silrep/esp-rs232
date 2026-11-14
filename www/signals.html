@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Satellite Signals</title>
+    <link rel="icon" href="favicon.ico">
+    <style>
+        :root {
+            color-scheme: light;
+            --surface-0: #f3f3f1;
+            --surface-1: #fcfcfb;
+            --border: #dddcd7;
+            --grid: #e6e5e0;
+            --text-primary: #0b0b0b;
+            --text-secondary: #52514e;
+            --text-muted: #77766f;
+            --link: #2a63b8;
+            /* Satellite status, u-center order: used in fix, tracked with orbit data, tracked without */
+            --sat-used: #2e9e3e;
+            --sat-orbit: #1592ad;
+            --sat-no-orbit: #3b4fd8;
+            --warn-bg: #fff4d6;
+            --warn-text: #6b4a00;
+            --good: #1f7a2e;
+            --serious: #b3261e;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                color-scheme: dark;
+                --surface-0: #111110;
+                --surface-1: #1a1a19;
+                --border: #33322f;
+                --grid: #2a2a28;
+                --text-primary: #f0efec;
+                --text-secondary: #c3c2b7;
+                --text-muted: #8f8e86;
+                --link: #7fb0f5;
+                --sat-used: #3aa84a;
+                --sat-orbit: #1d9fb9;
+                --sat-no-orbit: #5868f0;
+                --warn-bg: #3a2f10;
+                --warn-text: #f3d68a;
+                --good: #6fcf7f;
+                --serious: #f28b82;
+            }
+        }
+        :root[data-theme="dark"] {
+            color-scheme: dark;
+            --surface-0: #111110;
+            --surface-1: #1a1a19;
+            --border: #33322f;
+            --grid: #2a2a28;
+            --text-primary: #f0efec;
+            --text-secondary: #c3c2b7;
+            --text-muted: #8f8e86;
+            --link: #7fb0f5;
+            --sat-used: #3aa84a;
+            --sat-orbit: #1d9fb9;
+            --sat-no-orbit: #5868f0;
+            --warn-bg: #3a2f10;
+            --warn-text: #f3d68a;
+            --good: #6fcf7f;
+            --serious: #f28b82;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--surface-0);
+            color: var(--text-primary);
+            font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        a { color: var(--link); }
+        main {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 4px 16px;
+            margin-bottom: 12px;
+        }
+        h1 { font-size: 20px; margin: 0; font-weight: 600; }
+        .muted { color: var(--text-muted); }
+        .secondary { color: var(--text-secondary); }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 260px;
+            gap: 12px;
+        }
+        @media (max-width: 860px) {
+            .layout { grid-template-columns: minmax(0, 1fr); }
+        }
+        .panel {
+            background: var(--surface-1);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 16px;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+        .legend span { display: inline-flex; align-items: center; gap: 6px; }
+        .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+        .swatch.hatched {
+            background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--surface-1) 3px 4.5px);
+        }
+
+        .chart-scroll {
+            overflow-x: auto;
+            overflow-y: hidden;
+            position: relative;
+        }
+        canvas { display: block; }
+
+        .notice {
+            background: var(--warn-bg);
+            color: var(--warn-text);
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            display: none;
+        }
+
+        #tooltip {
+            position: fixed;
+            pointer-events: none;
+            background: var(--surface-1);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+            display: none;
+            z-index: 10;
+            max-width: 260px;
+        }
+        #tooltip .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
+
+        dl.facts {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 4px 12px;
+            margin: 0;
+        }
+        dl.facts dt { color: var(--text-secondary); }
+        dl.facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+        .big {
+            font-size: 28px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
+        }
+        .sats-row { display: flex; gap: 16px; margin-bottom: 12px; }
+        .sats-row div { flex: 1; }
+        .good { color: var(--good); }
+        .serious { color: var(--serious); }
+        hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+
+        details { margin-top: 12px; }
+        summary { cursor: pointer; color: var(--text-secondary); }
+        .table-wrap { overflow-x: auto; }
+        table { border-collapse: collapse; width: 100%; margin-top: 8px; font-variant-numeric: tabular-nums; }
+        th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+        th { color: var(--text-secondary); font-weight: 600; }
+        td.num, th.num { text-align: right; }
+    </style>
+</head>
+<body>
+<main>
+    <header>
+        <h1>Satellite signals</h1>
+        <span class="muted" id="updated">Waiting for the receiver…</span>
+        <a href="./" style="margin-left: auto">Back to config</a>
+    </header>
+
+    <div class="layout">
+        <section class="panel">
+            <div class="notice" id="notice"></div>
+            <div class="legend" aria-label="Legend">
+                <span><i class="swatch" style="background: var(--sat-used)"></i>Used in fix</span>
+                <span><i class="swatch hatched" style="background-color: var(--sat-orbit)"></i>Tracked, orbit known, not used</span>
+                <span><i class="swatch hatched" style="background-color: var(--sat-no-orbit)"></i>Tracked, no orbit yet</span>
+                <span><i class="swatch" style="background: var(--text-muted); height: 2px; border-radius: 0"></i>Other band C/N0</span>
+            </div>
+            <div class="chart-scroll" id="chart-scroll">
+                <canvas id="chart" role="img" aria-label="Signal strength per satellite"></canvas>
+            </div>
+            <details>
+                <summary>Table</summary>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>Satellite</th><th>Status</th><th class="num">C/N0</th><th>Signals (dB-Hz)</th>
+                            <th class="num">Elevation</th><th class="num">Azimuth</th>
+                        </tr>
+                        </thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </details>
+        </section>
+
+        <aside class="panel">
+            <div class="sats-row">
+                <div>
+                    <div class="secondary">Used</div>
+                    <div class="big" id="sats-used">–</div>
+                </div>
+                <div>
+                    <div class="secondary">Tracked</div>
+                    <div class="big" id="sats-tracked">–</div>
+                </div>
+            </div>
+            <dl class="facts">
+                <dt>Fix</dt><dd id="fix">–</dd>
+                <dt>RS-232 GGA sats</dt><dd id="rs232-sats">–</dd>
+                <dt>Receiver GGA sats</dt><dd id="gga-sats">–</dd>
+            </dl>
+            <hr>
+            <dl class="facts">
+                <dt>Latitude</dt><dd id="lat">–</dd>
+                <dt>Longitude</dt><dd id="lon">–</dd>
+                <dt>Altitude (MSL)</dt><dd id="alt">–</dd>
+                <dt>Horizontal σ</dt><dd id="acc-2d">–</dd>
+                <dt>Vertical σ</dt><dd id="acc-v">–</dd>
+                <dt>PDOP</dt><dd id="pdop">–</dd>
+                <dt>HDOP</dt><dd id="hdop">–</dd>
+                <dt>Correction age</dt><dd id="corr">–</dd>
+            </dl>
+            <hr>
+            <dl class="facts" id="per-gnss"></dl>
+        </aside>
+    </div>
+</main>
+<div id="tooltip" role="tooltip"></div>
+
+<script>
+(function() {
+    'use strict';
+
+    var POLL_MS = 1000;
+    var STALE_S = 3;
+    var FEET_PER_METRE = 1 / 0.3048;
+
+    // UBX gnssId, in the order u-center shows them
+    var GNSS = {
+        0: {prefix: 'G', name: 'GPS', order: 0},
+        6: {prefix: 'R', name: 'GLONASS', order: 1},
+        1: {prefix: 'S', name: 'SBAS', order: 2},
+        2: {prefix: 'E', name: 'Galileo', order: 3},
+        3: {prefix: 'B', name: 'BeiDou', order: 4},
+        5: {prefix: 'Q', name: 'QZSS', order: 5}
+    };
+
+    // UBX sigId names per gnssId
+    var SIGNALS = {
+        0: {0: 'L1C/A', 3: 'L2 CL', 4: 'L2 CM', 6: 'L5 I', 7: 'L5 Q'},
+        1: {0: 'L1C/A'},
+        2: {0: 'E1 C', 1: 'E1 B', 3: 'E5a I', 4: 'E5a Q', 5: 'E5b I', 6: 'E5b Q'},
+        3: {0: 'B1I D1', 1: 'B1I D2', 2: 'B2I D1', 3: 'B2I D2', 5: 'B1C', 7: 'B2a'},
+        5: {0: 'L1C/A', 1: 'L1S', 4: 'L2 CM', 5: 'L2 CL'},
+        6: {0: 'L1 OF', 2: 'L2 OF'}
+    };
+
+    var QUALITY = ['no signal', 'searching', 'acquired', 'unusable', 'code locked', 'code & carrier locked',
+        'code & carrier locked', 'code & carrier locked'];
+    var ORBIT = ['none', 'ephemeris', 'almanac', 'AssistNow Offline', 'AssistNow Autonomous', 'other', 'other', 'other'];
+    var FIX_NAMES = ['No fix', 'GPS', 'DGPS', 'PPS', 'RTK fixed', 'RTK float', 'Dead reckoning', 'Manual', 'Simulation'];
+
+    var canvas = document.getElementById('chart');
+    var scroll = document.getElementById('chart-scroll');
+    var tooltip = document.getElementById('tooltip');
+    var notice = document.getElementById('notice');
+    var ctx = canvas.getContext('2d');
+
+    var bars = []; // Drawn satellites with their hit boxes
+    var sats = [];
+    var hoverIndex = -1;
+
+    var $ = function(id) { return document.getElementById(id); };
+    var css = function(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
+
+    // Rows from /sats: gnss, sv, cno, elevation, azimuth, quality, orbit source, used, healthy, signals
+    var parseSat = function(row) {
+        var info = GNSS[row[0]] || {prefix: '?', name: 'GNSS ' + row[0], order: 9};
+        return {
+            gnss: row[0],
+            info: info,
+            label: info.prefix + row[1],
+            sv: row[1],
+            cno: row[2],
+            elevation: row[3],
+            azimuth: row[4],
+            quality: row[5],
+            orbit: row[6],
+            used: row[7] === 1,
+            healthy: row[8] === 1,
+            signals: (row[9] || []).map(function(s) {
+                return {name: (SIGNALS[row[0]] || {})[s[0]] || ('sig ' + s[0]), cno: s[1], quality: s[2], used: s[3] === 1};
+            })
+        };
+    };
+
+    var status = function(sat) {
+        if (sat.used) return {key: 'used', text: 'Used in fix', color: css('--sat-used'), hatched: false};
+        if (sat.orbit > 0) return {key: 'orbit', text: 'Tracked, ' + ORBIT[sat.orbit] + ', not used', color: css('--sat-orbit'), hatched: true};
+        return {key: 'no-orbit', text: 'Tracked, no orbit yet', color: css('--sat-no-orbit'), hatched: true};
+    };
+
+    var roundedTop = function(x, y, w, h, r) {
+        r = Math.min(r, w / 2, h);
+        ctx.beginPath();
+        ctx.moveTo(x, y + h);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h);
+        ctx.closePath();
+    };
+
+    var draw = function() {
+        var tracked = sats.filter(function(s) { return s.cno > 0; });
+        tracked.sort(function(a, b) { return a.info.order - b.info.order || a.sv - b.sv; });
+
+        var dpr = window.devicePixelRatio || 1;
+        var available = scroll.clientWidth;
+        var axisWidth = 34;
+        var minBar = 18;
+        var width = Math.max(available, axisWidth + tracked.length * minBar + 8);
+        var height = Math.max(260, Math.min(420, Math.round(available * 0.42)));
+
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        var surface = css('--surface-1');
+        var grid = css('--grid');
+        var textSecondary = css('--text-secondary');
+        var textMuted = css('--text-muted');
+        var textPrimary = css('--text-primary');
+
+        var top = 18, bottom = 36;
+        var plotH = height - top - bottom;
+        var plotX = axisWidth, plotW = width - axisWidth - 4;
+        var maxCno = 55;
+        tracked.forEach(function(s) { if (s.cno > maxCno) maxCno = Math.ceil(s.cno / 5) * 5; });
+        var y = function(cno) { return top + plotH - cno / maxCno * plotH; };
+
+        // Recessive grid every 10 dB-Hz
+        ctx.font = '11px system-ui, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (var g = 0; g <= maxCno; g += 10) {
+            ctx.strokeStyle = grid;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(plotX, Math.round(y(g)) + 0.5);
+            ctx.lineTo(plotX + plotW, Math.round(y(g)) + 0.5);
+            ctx.stroke();
+            ctx.fillStyle = textMuted;
+            ctx.fillText(String(g), plotX - 6, y(g));
+        }
+        ctx.save();
+        ctx.translate(10, top + plotH / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('C/N0 dB-Hz', 0, 0);
+        ctx.restore();
+
+        bars = [];
+        if (tracked.length === 0) {
+            ctx.fillStyle = textMuted;
+            ctx.textAlign = 'center';
+            ctx.font = '13px system-ui, sans-serif';
+            ctx.fillText('No satellites tracked', plotX + plotW / 2, top + plotH / 2);
+            return;
+        }
+
+        var slot = plotW / tracked.length;
+        var gap = 2; // Surface gap between neighbouring bars
+        var barW = Math.max(4, Math.min(slot - gap, 40));
+        var labelEvery = 1;
+
+        tracked.forEach(function(sat, i) {
+            var st = status(sat);
+            var x = plotX + i * slot + (slot - barW) / 2;
+            var yTop = y(sat.cno);
+            var h = top + plotH - yTop;
+
+            ctx.globalAlpha = hoverIndex >= 0 && hoverIndex !== i ? 0.55 : 1;
+            ctx.fillStyle = st.color;
+            roundedTop(x, yTop, barW, h, 4);
+            ctx.fill();
+
+            if (st.hatched) {
+                ctx.save();
+                roundedTop(x, yTop, barW, h, 4);
+                ctx.clip();
+                ctx.strokeStyle = surface;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (var d = -h; d < barW + h; d += 6) {
+                    ctx.moveTo(x + d, top + plotH);
+                    ctx.lineTo(x + d + h, yTop);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // The other bands, as a line across the bar at their C/N0
+            sat.signals.forEach(function(signal) {
+                if (signal.cno <= 0 || signal.cno >= sat.cno) return;
+                var ys = Math.round(y(signal.cno)) + 0.5;
+                ctx.strokeStyle = surface;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x + 1, ys);
+                ctx.lineTo(x + barW - 1, ys);
+                ctx.stroke();
+            });
+            ctx.globalAlpha = 1;
+
+            // C/N0 above the bar, satellite under the axis
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = textSecondary;
+            ctx.font = (barW >= 20 ? '12px' : '10px') + ' system-ui, sans-serif';
+            ctx.fillText(String(sat.cno), x + barW / 2, yTop - 2);
+
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = textPrimary;
+            if (barW >= 26) {
+                ctx.fillText(sat.label, x + barW / 2, top + plotH + 6);
+            } else {
+                ctx.save();
+                ctx.translate(x + barW / 2, top + plotH + 4);
+                ctx.rotate(-Math.PI / 2);
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(sat.label, 0, 0);
+                ctx.restore();
+            }
+
+            bars.push({sat: sat, x0: plotX + i * slot, x1: plotX + (i + 1) * slot, status: st});
+        });
+
+        // Baseline
+        ctx.strokeStyle = textMuted;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(plotX, top + plotH + 0.5);
+        ctx.lineTo(plotX + plotW, top + plotH + 0.5);
+        ctx.stroke();
+    };
+
+    var escapeHtml = function(text) {
+        return String(text).replace(/[&<>"]/g, function(c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; });
+    };
+
+    var signalsText = function(sat) {
+        return sat.signals.map(function(s) { return s.name + ' ' + s.cno + (s.used ? '' : ' (not used)'); }).join(', ');
+    };
+
+    var showTooltip = function(bar, clientX, clientY) {
+        var sat = bar.sat;
+        var lines = [
+            '<strong>' + escapeHtml(sat.info.name + ' ' + sat.label) + '</strong>',
+            '<span class="sw" style="background:' + bar.status.color + '"></span>' + escapeHtml(bar.status.text),
+            'C/N0 ' + sat.cno + ' dB-Hz, ' + escapeHtml(QUALITY[sat.quality] || ''),
+            sat.elevation >= -90 ? 'Elevation ' + sat.elevation + '°, azimuth ' + sat.azimuth + '°' : ''
+        ];
+        if (sat.signals.length > 0) lines.push(escapeHtml(signalsText(sat)));
+        if (!sat.healthy) lines.push('Not healthy');
+        tooltip.innerHTML = lines.filter(Boolean).join('<br>');
+        tooltip.style.display = 'block';
+
+        var rect = tooltip.getBoundingClientRect();
+        var left = clientX + 14, top = clientY + 14;
+        if (left + rect.width > window.innerWidth - 8) left = clientX - rect.width - 14;
+        if (top + rect.height > window.innerHeight - 8) top = clientY - rect.height - 14;
+        tooltip.style.left = Math.max(8, left) + 'px';
+        tooltip.style.top = Math.max(8, top) + 'px';
+    };
+
+    var onPointer = function(e) {
+        var rect = canvas.getBoundingClientRect();
+        var x = e.clientX - rect.left;
+        var index = -1;
+        for (var i = 0; i < bars.length; i++) {
+            if (x >= bars[i].x0 && x < bars[i].x1) { index = i; break; }
+        }
+        if (index !== hoverIndex) {
+            hoverIndex = index;
+            draw();
+        }
+        if (index >= 0) {
+            showTooltip(bars[index], e.clientX, e.clientY);
+        } else {
+            tooltip.style.display = 'none';
+        }
+    };
+    canvas.addEventListener('pointermove', onPointer);
+    canvas.addEventListener('pointerdown', onPointer);
+    canvas.addEventListener('pointerleave', function() {
+        hoverIndex = -1;
+        tooltip.style.display = 'none';
+        draw();
+    });
+
+    var renderTable = function() {
+        var body = $('table-body');
+        var rows = sats.slice().sort(function(a, b) { return a.info.order - b.info.order || a.sv - b.sv; });
+        body.innerHTML = rows.map(function(sat) {
+            return '<tr><td>' + escapeHtml(sat.info.name + ' ' + sat.label) + '</td>' +
+                '<td>' + escapeHtml(sat.cno > 0 ? status(sat).text : 'Not tracked') + '</td>' +
+                '<td class="num">' + sat.cno + '</td>' +
+                '<td>' + escapeHtml(signalsText(sat)) + '</td>' +
+                '<td class="num">' + (sat.elevation >= -90 ? sat.elevation + '°' : '') + '</td>' +
+                '<td class="num">' + (sat.elevation >= -90 ? sat.azimuth + '°' : '') + '</td></tr>';
+        }).join('');
+    };
+
+    var renderSummary = function() {
+        var used = sats.filter(function(s) { return s.used; });
+        var tracked = sats.filter(function(s) { return s.cno > 0; });
+        $('sats-used').textContent = String(used.length);
+        $('sats-tracked').textContent = String(tracked.length);
+
+        var perGnss = {};
+        tracked.forEach(function(s) {
+            var entry = perGnss[s.info.name] || (perGnss[s.info.name] = {order: s.info.order, used: 0, tracked: 0});
+            entry.tracked++;
+            if (s.used) entry.used++;
+        });
+        $('per-gnss').innerHTML = Object.keys(perGnss)
+            .sort(function(a, b) { return perGnss[a].order - perGnss[b].order; })
+            .map(function(name) {
+                return '<dt>' + escapeHtml(name) + '</dt><dd>' + perGnss[name].used + ' of ' + perGnss[name].tracked + ' used</dd>';
+            }).join('');
+    };
+
+    var showNotice = function(text) {
+        notice.textContent = text || '';
+        notice.style.display = text ? 'block' : 'none';
+    };
+
+    var pollSats = function() {
+        fetch('sats', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(data) {
+            if (!data.sats) {
+                sats = [];
+                showNotice('No NAV-SAT from the receiver. Write the F9P config on the config page to turn it on.');
+            } else {
+                sats = data.sats.map(parseSat);
+                if (data.age > STALE_S) {
+                    showNotice('Last NAV-SAT is ' + Math.round(data.age) + ' s old, the receiver stopped sending it.');
+                } else if (typeof data.signals_age === 'undefined' || data.signals_age > STALE_S) {
+                    showNotice('No NAV-SIG from the receiver, so no per-band lines. Write the F9P config to turn it on.');
+                } else {
+                    showNotice('');
+                }
+                $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+            }
+            draw();
+            renderSummary();
+            renderTable();
+        }).catch(function() {
+            showNotice('Could not reach the ESP32.');
+        }).finally(function() {
+            setTimeout(pollSats, POLL_MS);
+        });
+    };
+
+    var feet = function(metres, digits) { return (metres * FEET_PER_METRE).toFixed(digits) + ' ft'; };
+    var setText = function(id, text, className) {
+        var el = $(id);
+        el.textContent = text;
+        el.className = className || '';
+    };
+
+    var pollStatus = function() {
+        fetch('status', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(data) {
+            var rtk = data.rtk || {};
+            var rover = rtk.rover;
+            var gst = rtk.gst;
+            var gsa = rtk.gsa;
+            var rs232 = data.rs232;
+
+            if (rover) {
+                setText('fix', FIX_NAMES[rover.fix] || ('Fix ' + rover.fix),
+                    rover.fix === 4 ? 'good' : (rover.fix === 0 ? 'serious' : ''));
+                setText('gga-sats', String(rover.sats));
+                setText('lat', typeof rover.lat === 'number' ? rover.lat.toFixed(8) + '°' : '–');
+                setText('lon', typeof rover.lon === 'number' ? rover.lon.toFixed(8) + '°' : '–');
+                setText('alt', typeof rover.alt === 'number' ? feet(rover.alt, 2) : '–');
+                setText('hdop', typeof rover.hdop === 'number' ? rover.hdop.toFixed(2) : '–');
+                setText('corr', typeof rover.correction_age === 'number' ? rover.correction_age.toFixed(1) + ' s' : '–');
+            }
+            if (gst && typeof gst.lat === 'number' && typeof gst.lon === 'number') {
+                setText('acc-2d', feet(Math.hypot(gst.lat, gst.lon), 3));
+            }
+            if (gst && typeof gst.alt === 'number') setText('acc-v', feet(gst.alt, 3));
+            if (gsa && typeof gsa.pdop === 'number') setText('pdop', gsa.pdop.toFixed(2));
+
+            if (rs232 && typeof rs232.sats_out === 'number') {
+                setText('rs232-sats', rs232.sats_out + (rs232.sats_source !== 'GGA' ? ' (' + rs232.sats_source + ')' : ''));
+            }
+        }).catch(function() {
+        }).finally(function() {
+            setTimeout(pollStatus, POLL_MS);
+        });
+    };
+
+    window.addEventListener('resize', draw);
+    if (window.matchMedia) {
+        var scheme = window.matchMedia('(prefers-color-scheme: dark)');
+        if (scheme.addEventListener) scheme.addEventListener('change', draw);
+    }
+
+    draw();
+    pollSats();
+    pollStatus();
+})();
+</script>
+</body>
+</html>

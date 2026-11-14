@@ -1,0 +1,1838 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ESP32 RS-232 config</title>
+    <script src="jquery-3.4.1.min.js"></script>
+    <script src="bs-4.3.1.bundle.min.js"></script>
+    <link rel="stylesheet" href="bs-4.3.1.min.css">
+    <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        input::-webkit-outer-spin-button,
+        input::-webkit-inner-spin-button {
+            /* display: none; <- Crashes Chrome on hover */
+            -webkit-appearance: none;
+            margin: 0; /* <-- Apparently some margin are still there even though it's hidden */
+        }
+
+        input[type=number] {
+            -moz-appearance:textfield; /* Firefox */
+        }
+
+        input[type=color] {
+            -webkit-appearance: none;
+            border: none;
+            width: 20px;
+            border-radius: 5px;
+        }
+
+        .card .card-body {
+            transition: all ease-in-out 0.25s;
+        }
+
+        .card .card-body.disabled {
+            opacity: 0.75;
+            filter: blur(5px);
+            pointer-events: none;
+        }
+
+        footer {
+            padding: 20px 0;
+        }
+
+        .tooltip-inner {
+            max-width: 95vw;
+            width: 300px;
+        }
+    </style>
+    <script>
+        const releases_api_url = 'https://api.github.com/repos/AOG-silrep/esp-rs232/releases';
+        const releases_html_url = 'https://github.com/AOG-silrep/esp-rs232/releases';
+
+        // 'v0.6.10' -> [0, 6, 10], compared part by part so that v0.6.10 > v0.6.4
+        const parseVersion = (tag) => tag.replace(/[^\d.]/g, '').split('.').filter(part => part.length).map(Number);
+        const compareVersions = function(a, b) {
+            for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                const diff = (a[i] || 0) - (b[i] || 0);
+                if (diff !== 0) return diff;
+            }
+            return 0;
+        };
+
+        $.fn.serializeObject = function() {
+            var o = {};
+            var a = this.serializeArray();
+            $.each(a, function() {
+                if (o[this.name]) {
+                    if (!o[this.name].push) {
+                        o[this.name] = [o[this.name]];
+                    }
+                    o[this.name].push(this.value || '');
+                } else {
+                    o[this.name] = this.value || '';
+                }
+            });
+            return o;
+        };
+
+        $.fn.appendText = function(text) {
+            $(this).append(document.createTextNode(text));
+            return this;
+        };
+
+        function print_escape(str) {
+            return str.replace(/\\/g, '\\\\')
+                .replace(/\n/g, '\\n')
+                .replace(/\r/g, '\\r')
+                .replace(/\t/g, '\\t');
+        }
+
+        function print_unescape(str) {
+            return str.replace(/\\\\/g, '\\')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t');
+        }
+
+        $(function() {
+            $('[data-toggle="tooltip"]').tooltip({
+                animation: false,
+                container: 'body',
+                html: true
+            });
+
+            var form = $("#form");
+
+            form.on('submit', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (form[0].checkValidity() !== false) {
+                    var submit = form.find(':submit').prop('disabled', true);
+                    var data = JSON.stringify($(this).serializeObject());
+                    $.post('config', data).done(function() {
+                        $('#restarting-modal').modal('show');
+
+                        // Allow some time to reload
+                        setTimeout(function() {
+                            reloadOnStatus = true;
+                        }, 2500);
+                    }).always(function() {
+                        submit.prop('disabled', false);
+                    });
+                }
+
+                form.addClass('was-validated');
+            });
+
+            $('#ota-submit').on('click', function() {
+                var file = $('#ota-file')[0].files[0];
+                if (!file) return;
+
+                var submit = $('#ota-submit').prop('disabled', true);
+                var progress = $('#ota-progress').show();
+                var progressBar = $('#ota-progress-bar').css('width', '0');
+                var error = $('#ota-error').hide();
+
+                var xhr = new XMLHttpRequest();
+                xhr.upload.addEventListener('progress', function(evt) {
+                    if (evt.lengthComputable) {
+                        progressBar.css('width', (evt.loaded / evt.total * 100) + '%');
+                    }
+                });
+                xhr.addEventListener('load', function() {
+                    submit.prop('disabled', false);
+
+                    if (xhr.status === 200) {
+                        $('#restarting-modal').modal('show');
+
+                        setTimeout(function() {
+                            reloadOnStatus = true;
+                        }, 2500);
+                    } else {
+                        error.text('Update failed: ' + xhr.responseText).show();
+                        progress.hide();
+                    }
+                });
+                xhr.addEventListener('error', function() {
+                    submit.prop('disabled', false);
+                    error.text('Update failed: connection error').show();
+                    progress.hide();
+                });
+                xhr.open('POST', 'ota');
+                xhr.send(file);
+            });
+
+            $('#reset-confirm').on('click', function() {
+                var submit = $(this).prop('disabled', true);
+                var data = JSON.stringify({ wifi_sta: $('#reset-wifi-sta').prop('checked') });
+                $.post('config/reset', data).done(function() {
+                    $('#reset-modal').modal('hide');
+                    $('#restarting-modal').modal('show');
+
+                    // Allow some time to reload
+                    setTimeout(function() {
+                        reloadOnStatus = true;
+                    }, 2500);
+                }).always(function() {
+                    submit.prop('disabled', false);
+                });
+            });
+
+            form.find("input[type='checkbox']").each(function() {
+                var self = $(this);
+                var hidden = $("<input>")
+                    .attr('name', self.attr('name'))
+                    .attr('type', 'hidden')
+                    .data('checkbox', true)
+                    .attr('value', '0')
+                    .prop('disabled', self.prop('checked'))
+                    .insertAfter(self);
+                $(this).on('change', function() {
+                    hidden.prop('disabled', self.prop('checked'));
+                });
+            });
+
+            var checkDisableIfs = function() {
+                form.find("[data-disable-if]").each(function() {
+                    var condition = $(this).data('disable-if-condition');
+                    if (typeof condition === 'undefined') condition = ':not(:checked)';
+
+                    var disabled = form.find($(this).data('disable-if')).filter(condition).length > 0;
+                    var current = $(this).hasClass('disabled');
+                    if (disabled === current) return;
+
+                    $(this).prop('disabled', disabled);
+                    $(this).toggleClass('disabled', disabled);
+
+                    if ($(this).is('div')) {
+                        $(this).find(':input').each(function() {
+                            if (disabled) {
+                                $(this).data('prop-disabled-previous', $(this).prop('disabled') === true)
+                                    .data('class-disabled-previous', $(this).hasClass('disabled'))
+                                    .prop('disabled', true)
+                                    .addClass('disabled');
+                            } else {
+                                $(this).prop('disabled', $(this).data('prop-disabled-previous') === true)
+                                    .toggleClass('disabled', $(this).data('class-disabled-previous') === true);
+                            }
+                        })
+                    }
+                });
+            };
+
+            checkDisableIfs();
+
+            form.find(":input").on('change', checkDisableIfs);
+
+            $('#switch-uart').on('click', function() {
+                if (confirm("WARNING\n\nThese settings are mainly for development purposes and do not normally have to be changed. With a standard ESP32 RS-232 device the only setting you may want to change is the UART baud rate. DO NOT PROCEED unless you know what you are doing.")) {
+                    $(this).hide();
+                    checkDisableIfs();
+                }
+            });
+
+            const projectVersionText = $('#project-version');
+
+            $.getJSON('config').done(function(data) {
+                projectVersionText.text(data.version);
+
+                if (data.version.includes('-')) data.version = data.version.substring(0, data.version.indexOf('-'));
+                let current_version = parseVersion(data.version);
+                $.getJSON(releases_api_url, function(data) {
+                    if (!(data instanceof Array)) return;
+
+                    let latest_version = [];
+                    let release_url = null;
+                    let latest_version_prerelease = null;
+                    let prerelease_url = null;
+                    for (const release of data) {
+                        let version = parseVersion(release.tag_name);
+                        if (release.prerelease && latest_version_prerelease === null) {
+                            latest_version_prerelease = version;
+                            prerelease_url = release.html_url;
+                            continue;
+                        }
+                        latest_version = version;
+                        release_url = release.html_url;
+                        break;
+                    }
+
+                    projectVersionText.attr('href', release_url)
+                        .removeClass('text-muted');
+
+                    const latest_compare = compareVersions(latest_version, current_version);
+                    if (latest_compare === 0) {
+                        projectVersionText.addClass('text-success')
+                            .appendText(' (latest)');
+                    } else if (latest_compare > 0) {
+                        projectVersionText.addClass('text-warning')
+                            .appendText(" (old)");
+                    } else {
+                        projectVersionText.attr('href', releases_html_url)
+                            .addClass('text-primary')
+                            .appendText(' (dev)');
+                    }
+
+                    if (latest_version_prerelease !== null &&
+                            compareVersions(latest_version_prerelease, latest_version) > 0 &&
+                            compareVersions(latest_version_prerelease, current_version) > 0) {
+                        $('#prerelease-available').attr('href', prerelease_url).show();
+                    }
+                });
+
+                form.find(':input').each(function() {
+                    if (!this.name || typeof data[this.name] === 'undefined') return;
+
+                    let value = data[this.name];
+                    const $this = $(this);
+
+                    if (Array.isArray(value)) {
+                        const index = form.find(':input[name="' + this.name + '"]').index(this);
+
+                        if (value.length > index) {
+                            value = value[index];
+                        } else {
+                            return;
+                        }
+                    }
+
+                    if (this.type === 'checkbox' || this.type === 'radio') {
+                        var active = $this.val() == value;
+                        $this.prop('checked', active);
+                        $this.parent('.btn').toggleClass('active', active);
+                    } else if (this.type === 'hidden' && $this.data('checkbox')) {
+                        $this.prop('disabled', $this.val() != value);
+                    } else {
+                        $this.val(value);
+                    }
+
+                    // Reformat values when needed
+                    if ($this.data('formatted')) $this.trigger('change');
+                });
+
+                checkDisableIfs();
+                rs232Estimate();
+            });
+
+            var wifiRssiColorClass = function(rssi) {
+                if (rssi > -50) {
+                    return 'primary';
+                } else if (rssi > -60) {
+                    return 'success';
+                } else if (rssi > -70) {
+                    return 'warning';
+                } else {
+                    return 'danger';
+                }
+            };
+
+            var cpuLoadColorClass = function(load) {
+                if (load < 50) {
+                    return 'success';
+                } else if (load < 80) {
+                    return 'warning';
+                } else {
+                    return 'danger';
+                }
+            };
+
+            var deviceUptimeText = $('.uptime');
+            var deviceHeapText = $('.heap');
+            var cpuLoadRows = $('.cpu-load-row');
+
+            var wifiApStatusText = form.find('.wifi-ap-status');
+            var wifiApStatusActiveInput = form.find('#status-wifi-ap-active');
+            var wifiStaStatusText = form.find('.wifi-sta-status');
+            var wifiStaInternetText = form.find('.wifi-sta-internet');
+
+            var streamStatsTexts = form.find('.stream-stats');
+
+            var uartGpsText = form.find('.uart-gps');
+            var rs232StatusText = form.find('.rs232-status');
+            var ntripClientRtkText = form.find('.ntrip-client-rtk');
+
+            // Latest receiver position, for sorting mountpoints by distance
+            var roverPosition = null;
+
+            var reloadOnStatus = false;
+
+            var secondsToHHMMSS = (seconds) => {
+                var hours   = Math.floor(seconds / 3600);
+                var minutes = Math.floor(seconds / 60) % 60;
+                seconds %= 60;
+
+                return [hours, minutes, seconds]
+                    .map(v => v < 10 ? "0" + v : v)
+                    .join(":");
+            };
+
+            var humanDataSize = (bytes) => {
+                var thresh = 1000;
+                if(Math.abs(bytes) < thresh) {
+                    return bytes + 'B';
+                }
+                var units = ['kB','MB','GB','TB','PB','EB','ZB','YB'];
+                var u = -1;
+                do {
+                    bytes /= thresh;
+                    ++u;
+                } while(Math.abs(bytes) >= thresh && u < units.length - 1);
+                return bytes.toFixed(1) + units[u];
+            };
+
+            var RTK_STALE_SECONDS = 10;
+            var RTK_BASE_STALE_SECONDS = 120;
+
+            var gpsFixNames = ['No fix', 'GPS', 'DGPS', 'PPS', 'RTK fixed', 'RTK float', 'Dead reckoning', 'Manual', 'Simulation'];
+            // GSA system IDs (NMEA 4.10+), 0 when the receiver doesn't give one
+            var gnssNames = ['GNSS', 'GPS', 'GLONASS', 'Galileo', 'BeiDou', 'QZSS', 'NavIC'];
+
+            var gpsFixColorClass = function(fix) {
+                if (fix === 4) {
+                    return 'success';
+                } else if (fix === 5) {
+                    return 'warning';
+                } else {
+                    return 'danger';
+                }
+            };
+
+            var METRES_PER_FOOT = 0.3048;
+            var FEET_PER_MILE = 5280;
+
+            var humanDistance = (metres) => {
+                var feet = metres / METRES_PER_FOOT;
+                return Math.abs(feet) >= 1000 ? (feet / FEET_PER_MILE).toFixed(3) + ' mi' : feet.toFixed(2) + ' ft';
+            };
+            var humanSigma = (metres) => typeof metres === 'undefined' ? '?' : (metres / METRES_PER_FOOT).toFixed(3) + ' ft';
+
+            var isStale = (age, staleSeconds) => typeof age !== 'undefined' && age > staleSeconds;
+            var staleSuffix = (age, staleSeconds) => isStale(age, staleSeconds) ? ' (' + Math.round(age) + 's old)' : '';
+
+            var addPart = function(element, text, colorClass, stale, title) {
+                if (element.children().length > 0) element.appendText(' \u00b7 ');
+
+                element.append($('<span>', {
+                    class: stale ? 'text-muted' : (colorClass ? 'text-' + colorClass : ''),
+                    text: text,
+                    title: title || ''
+                }));
+            };
+
+            // Hide the card footer holding the element when there is nothing to show
+            var toggleFooter = (element) => element.closest('.card-footer').toggle(element.children().length > 0);
+
+            // Receiver status from its own GGA/GSA/GST on the UART
+            var uartGpsUpdate = function(rtk) {
+                uartGpsText.empty();
+
+                if (typeof rtk !== 'undefined') {
+                    var rover = rtk.rover;
+                    var gst = rtk.gst;
+                    var gsa = rtk.gsa;
+                    var roverStale = rover && isStale(rover.age, RTK_STALE_SECONDS);
+
+                    // Second line, the satellites used
+                    var satellites = $('<span>');
+
+                    if (!rover) {
+                        addPart(uartGpsText, 'No GGA from receiver', 'muted');
+                    } else {
+                        addPart(uartGpsText, (gpsFixNames[rover.fix] || ('Fix ' + rover.fix)) + staleSuffix(rover.age, RTK_STALE_SECONDS),
+                            gpsFixColorClass(rover.fix), roverStale);
+                        if (typeof rover.hdop !== 'undefined') {
+                            addPart(uartGpsText, 'HDOP ' + rover.hdop.toFixed(2), null, roverStale);
+                        }
+                    }
+
+                    if (gsa && typeof gsa.vdop !== 'undefined') {
+                        addPart(uartGpsText, 'VDOP ' + gsa.vdop.toFixed(2) + staleSuffix(gsa.age, RTK_STALE_SECONDS), null,
+                            isStale(gsa.age, RTK_STALE_SECONDS), 'Vertical dilution of precision (GSA)');
+                    }
+
+                    if (gst) {
+                        addPart(uartGpsText, '\u03c3 ' + humanSigma(gst.lat) + ' / ' + humanSigma(gst.lon) + ' / ' + humanSigma(gst.alt) +
+                            staleSuffix(gst.age, RTK_STALE_SECONDS), null, isStale(gst.age, RTK_STALE_SECONDS),
+                            '1-sigma error latitude / longitude / altitude (GST)');
+                    }
+
+                    // GGA reports at most 12, the GSA per GNSS system lists every satellite used
+                    if (gsa && typeof gsa.sats !== 'undefined' && !isStale(gsa.age, RTK_STALE_SECONDS)) {
+                        addPart(satellites, gsa.sats + ' sats', null, false, 'Satellites used (GSA)');
+                        Object.keys(gsa.systems || {}).forEach(id => addPart(satellites, (gnssNames[id] || ('System ' + id)) + ' ' + gsa.systems[id]));
+                    } else if (rover) {
+                        addPart(satellites, rover.sats + ' sats', null, roverStale, 'Satellites used (GGA, the receiver reports at most 12)');
+                    }
+
+                    if (satellites.children().length > 0) uartGpsText.append($('<br>'), satellites);
+                }
+
+                toggleFooter(uartGpsText);
+            };
+
+            // Base station from the correction stream, and the receiver relative to it
+            var ntripClientRtkUpdate = function(rtk, clientRunning) {
+                ntripClientRtkText.empty();
+
+                if (typeof rtk !== 'undefined' && clientRunning) {
+                    var base = rtk.base;
+                    var rover = rtk.rover;
+                    var distance = rtk.distance;
+                    var hasPosition = rover && rover.fix !== 0 && !isStale(rover.age, RTK_STALE_SECONDS);
+
+                    if (!hasPosition) {
+                        // The client doesn't connect until there is one, an NTRIP mountpoint may send nothing without it
+                        addPart(ntripClientRtkText, 'Waiting for a GGA position from the receiver', 'warning');
+                    } else if (base) {
+                        addPart(ntripClientRtkText, 'Base ' + base.station_id + staleSuffix(base.age, RTK_BASE_STALE_SECONDS), null,
+                            isStale(base.age, RTK_BASE_STALE_SECONDS),
+                            'RTCM ' + base.message_type + ' ECEF ' + base.ecef.map(v => v.toFixed(4)).join(', '));
+                    } else {
+                        addPart(ntripClientRtkText, 'Waiting for base position (RTCM 1005/1006)', 'muted');
+                    }
+
+                    if (rover) {
+                        var roverStale = isStale(rover.age, RTK_STALE_SECONDS);
+
+                        if (distance) {
+                            addPart(ntripClientRtkText, humanDistance(distance.d3) + ' (horiz ' + humanDistance(distance.horizontal) + ', ' +
+                                (distance.vertical >= 0 ? '\u2191 ' : '\u2193 ') + humanDistance(Math.abs(distance.vertical)) + ')' +
+                                staleSuffix(rover.age, RTK_STALE_SECONDS),
+                                null, roverStale, '3D (horizontal, vertical) distance from base antenna');
+                        }
+                        if (typeof rover.correction_age !== 'undefined') {
+                            addPart(ntripClientRtkText, 'corr ' + rover.correction_age.toFixed(1) + ' s', null, roverStale,
+                                'Age of differential corrections at the receiver (GGA)');
+                        }
+                        if (base && typeof rover.station_id !== 'undefined' && rover.station_id !== base.station_id) {
+                            addPart(ntripClientRtkText, 'GGA station ' + rover.station_id + ' \u2260 base ' + base.station_id, 'warning', roverStale,
+                                'Receiver reports corrections from a different station ID than the RTCM 1005/1006 base position');
+                        }
+                    }
+                }
+
+                toggleFooter(ntripClientRtkText);
+            };
+
+            // RS-232: what the selected rates need of the selected baud rate, with typical sentence lengths
+            // (GSA: one per GNSS plus a second GPS one, GSV: a full set)
+            var rs232SentenceBytes = {GGA: 80, VTG: 45, RMC: 75, GSA: 4 * 68, GST: 70, GSV: 12 * 70};
+            var rs232Estimate = function() {
+                var bytes = 0;
+                form.find('select.rs232-rate').each(function() {
+                    bytes += rs232SentenceBytes[$(this).data('sentence')] * parseInt($(this).val());
+                });
+
+                var baud = parseInt(form.find('select[name="rs_baud_rate"]').val());
+                var capacity = baud / 10;
+                var load = bytes / capacity;
+                var text = '~' + bytes.toLocaleString() + ' of ' + capacity.toLocaleString() + ' bytes/s at ' + baud + ' baud (' +
+                    Math.round(load * 100) + '%)';
+                var estimate = form.find('.rs232-estimate');
+                if (load > 0.9) {
+                    estimate.attr('class', 'small mb-3 rs232-estimate text-danger')
+                        .text(text + ', too much: sentences will be dropped. Raise the baud rate or lower the rates.');
+                } else {
+                    estimate.attr('class', 'small mb-3 rs232-estimate text-muted').text(text);
+                }
+            };
+            form.on('change', 'select.rs232-rate, select[name="rs_baud_rate"]', rs232Estimate);
+            rs232Estimate();
+
+            // RS-232: satellites in the receiver's GGA and what went out, and whether the baud rate keeps up
+            var rs232Update = function(rs232, stream) {
+                rs232StatusText.empty();
+
+                if (rs232 && !rs232.active) {
+                    addPart(rs232StatusText, 'UART for RS-232 could not be set up, check the pins', 'danger');
+                } else if (rs232) {
+                    if (typeof rs232.sats_out === 'undefined') {
+                        addPart(rs232StatusText, 'No GGA from the receiver yet', 'muted');
+                    } else if (rs232.sats_source === 'GGA') {
+                        addPart(rs232StatusText, 'GGA ' + rs232.sats_out + ' sats, passed through as received', 'warning',
+                            false, 'No current satellite count from NAV-SAT or GSA, or the real count is switched off');
+                    } else {
+                        addPart(rs232StatusText, 'GGA ' + rs232.sats_out + ' sats out', 'success', false,
+                            'Satellites used, from ' + rs232.sats_source);
+                        if (typeof rs232.sats_in !== 'undefined') {
+                            addPart(rs232StatusText, 'receiver said ' + rs232.sats_in, 'muted');
+                        }
+                    }
+
+                    if (stream) {
+                        var capacity = rs232.baud / 10;
+                        var load = Math.round(stream.rate.out / capacity * 100);
+                        addPart(rs232StatusText, load + '% of ' + rs232.baud + ' baud', load > 80 ? 'warning' : null, false,
+                            stream.rate.out + ' of ' + capacity + ' bytes/s');
+                    }
+                    if (rs232.dropped > 0) {
+                        addPart(rs232StatusText, rs232.dropped + ' dropped', 'danger', false,
+                            'Sentences that did not fit, raise the baud rate or send fewer sentences');
+                    }
+                }
+
+                toggleFooter(rs232StatusText);
+            };
+
+            var wifiInternetStates = {
+                OK: ['Internet', 'success'],
+                CHECKING: ['Checking Internet…', 'muted'],
+                NO_DNS: ['No Internet (DNS failed)', 'danger'],
+                NO_REPLY: ['No ping reply from caster', 'warning', 'Some networks and casters drop pings, the NTRIP client still tries to connect'],
+                UNREACHABLE: ['No Internet', 'danger'],
+                PORTAL: ['Login page / captive portal', 'warning', 'The web check got a page back instead of an empty reply, the network may want you to log in']
+            };
+
+            // Internet health, from the NTRIP client pinging its caster or from the web check when the client is off
+            var wifiStaInternetUpdate = function(sta) {
+                wifiStaInternetText.empty();
+
+                if (sta.active && sta.connected) {
+                    if (sta.ip4 === '0.0.0.0') {
+                        addPart(wifiStaInternetText, 'Obtaining IP', 'muted');
+                    } else if (typeof sta.internet !== 'undefined') {
+                        var state = wifiInternetStates[sta.internet] || [sta.internet];
+
+                        addPart(wifiStaInternetText, state[0], state[1], false, state[2]);
+                        if (typeof sta.internet_ms !== 'undefined') addPart(wifiStaInternetText, sta.internet_ms + ' ms');
+                        if (sta.internet !== 'CHECKING' && sta.internet_host) addPart(wifiStaInternetText, sta.internet_host, 'muted');
+                    }
+                }
+
+                toggleFooter(wifiStaInternetText);
+            };
+
+            var statusUpdate = function() {
+                $.ajax({
+                    url: 'status',
+                    dataType: 'json',
+                    timeout: 2000
+                }).done(function(data) {
+                    if (reloadOnStatus) window.location.reload();
+
+                    // Uptime
+                    deviceUptimeText.text(secondsToHHMMSS(parseInt(data.uptime)));
+
+                    // Heap
+                    deviceHeapText.text(Math.round(data.heap.free / data.heap.total * 100) + "% free");
+
+                    // CPU load
+                    cpuLoadRows.each(function() {
+                        const core = $(this).data('core');
+                        if (typeof data.cpu_load[core] === 'undefined') return;
+
+                        const load = Math.round(data.cpu_load[core]);
+                        const bar = $(this).find('.cpu-load');
+
+                        bar.css('width', load + '%')
+                            .text(load + '%')
+                            .removeClass('bg-success bg-warning bg-danger')
+                            .addClass('bg-' + cpuLoadColorClass(load));
+                    });
+
+                    // Streams
+                    streamStatsTexts.each(function() {
+                        const stream = $(this).data('stream');
+                        if (typeof data.streams[stream] === 'undefined') return;
+
+                        const stats = data.streams[stream];
+
+                        $(this).text(humanDataSize(stats.total.in) +
+                            " in (" + humanDataSize(stats.rate.in) + "/s) / " +
+                            humanDataSize(stats.total.out) +
+                            " out (" + humanDataSize(stats.rate.out) + "/s)");
+                        $(this).prop('title', stats.total.in.toLocaleString() +
+                            " bytes in (" + (stats.rate.in * 8) + "bps) / " +
+                            stats.total.out.toLocaleString() +
+                            " bytes out (" + (stats.rate.out * 8) + "bps)");
+                    });
+
+                    // GPS receiver / RTK base station
+                    uartGpsUpdate(data.rtk);
+                    rs232Update(data.rs232, data.streams.rs232);
+                    ntripClientRtkUpdate(data.rtk, typeof data.streams.ntrip_client !== 'undefined');
+
+                    var rover = data.rtk && data.rtk.rover;
+                    if (rover && typeof rover.lat !== 'undefined' && typeof rover.lon !== 'undefined') {
+                        roverPosition = {lat: rover.lat, lon: rover.lon};
+                    }
+
+                    // WiFi
+                    let wifi = data.wifi;
+
+                    wifiApStatusText.empty();
+                    wifiStaStatusText.empty();
+
+                    if (!wifi.ap.active) {
+                        wifiApStatusText.text(wifi.ap.auto_disabled ? "Timeout - no clients" : "Disabled");
+                    } else {
+                        wifiApStatusText.appendText(wifi.ap.ssid + (wifi.ap.authmode == 'OPEN' ? " (OPEN)" : ''))
+                            .appendText(" / ")
+                            .append($('<a>', {text: wifi.ap.ip4, href: 'http://' + wifi.ap.ip4 + '/'}))
+                            .appendText(" / ")
+                            .appendText(wifi.ap.devices + " device" + (wifi.ap.devices != 1 ? "s" : ''));
+                    }
+                    wifiApStatusActiveInput.prop('checked', wifi.ap.active);
+                    checkDisableIfs();
+
+                    if (!wifi.sta.active) {
+                        wifiStaStatusText.text("Not Active");
+                    } else if (!wifi.sta.connected) {
+                        wifiStaStatusText.text("Not Connected");
+                    } else {
+                        wifiStaStatusText.appendText(wifi.sta.ssid + (wifi.sta.authmode == 'OPEN' ? " (OPEN)" : ''))
+                            .appendText(" / ")
+                            .append($('<a>', {text: wifi.sta.ip4, href: 'http://' + wifi.sta.ip4 + '/'}))
+                            .appendText(" / ")
+                            .append($('<span>', {class: 'text-' + wifiRssiColorClass(wifi.sta.rssi), text: wifi.sta.rssi + "dBm"}));
+                    }
+                    wifiStaInternetUpdate(wifi.sta);
+                }).always(function() {
+                    setTimeout(statusUpdate, 1000);
+                });
+            };
+            statusUpdate();
+
+            // WiFi Station networks list
+            var wifiNetworksScanButton = form.find('.wifi-networks-scan');
+            var wifiNetworksDropdownButton = form.find('.wifi-networks-dropdown');
+            var wifiNetworksList = form.find('.wifi-networks');
+            var wifiNetworksOpenList = wifiNetworksList.find('.wifi-networks-open');
+            var wifiNetworksSecuredList = wifiNetworksList.find('.wifi-networks-secured');
+            var wifiNetworksSsidInput = form.find('.wifi-networks-ssid');
+            var wifiNetworksPasswordInput = form.find('.wifi-networks-pass');
+            var wifiNetworksPasswordEmptyInput = form.find('.wifi-networks-pass-empty');
+            wifiNetworksScanButton.on('click', function() {
+                wifiNetworksOpenList.empty();
+                wifiNetworksSecuredList.empty();
+
+                wifiNetworksScanButton.prop('disabled', true);
+                wifiNetworksDropdownButton.prop('disabled', true);
+                $.getJSON('wifi/scan').always(function() {
+                    wifiNetworksScanButton.prop('disabled', false);
+                    wifiNetworksDropdownButton.prop('disabled', false);
+                }).done(function(data) {
+                    data.forEach(function(network) {
+                        var entry = $('<a>', {class: 'wifi-network dropdown-item', href: 'javascript:void(0);'});
+                        var open = network.authmode === "OPEN";
+                        entry.data('ssid', network.ssid);
+                        entry.data('rssi', network.rssi);
+                        entry.data('authmode', network.authmode);
+                        entry.data('open', open);
+
+                        entry.appendText(network.ssid + (open ? '' : " (" + network.authmode + ") "))
+                            .append($('<span>', {class: 'text-' + wifiRssiColorClass(network.rssi), text: network.rssi + "dBm"}));
+
+                        entry.appendTo(open ? wifiNetworksOpenList : wifiNetworksSecuredList);
+                    });
+
+                    wifiNetworksList.find('.wifi-network').on('click', function() {
+                        wifiNetworksSsidInput.val($(this).data('ssid'));
+                        wifiNetworksPasswordInput.val('').prop('disabled', $(this).data('open'));
+                        wifiNetworksPasswordEmptyInput.val('').prop('disabled', !$(this).data('open'));
+                    });
+
+                    wifiNetworksDropdownButton.trigger('click');
+                });
+            });
+
+            wifiNetworksSsidInput.on('input change', function() {
+                wifiNetworksPasswordInput.prop('disabled', false);
+                wifiNetworksPasswordEmptyInput.prop('disabled', true);
+            });
+
+            // NTRIP client mountpoints list from the caster's sourcetable
+            var ntripMountpointsScanButton = form.find('.ntrip-mountpoints-scan');
+            var ntripMountpointsDropdownButton = form.find('.ntrip-mountpoints-dropdown');
+            var ntripMountpointsList = form.find('.ntrip-mountpoints');
+            var ntripMountpointsMessage = ntripMountpointsList.find('.ntrip-mountpoints-message');
+            var ntripMountpointsOpenList = ntripMountpointsList.find('.ntrip-mountpoints-open');
+            var ntripMountpointsSecuredList = ntripMountpointsList.find('.ntrip-mountpoints-secured');
+            var ntripMountpointsMpInput = form.find('.ntrip-mountpoints-mp');
+
+            // Great-circle distance in km
+            var haversineKm = (lat1, lon1, lat2, lon2) => {
+                var rad = Math.PI / 180;
+                var dLat = (lat2 - lat1) * rad;
+                var dLon = (lon2 - lon1) * rad;
+                var a = Math.pow(Math.sin(dLat / 2), 2) +
+                    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.pow(Math.sin(dLon / 2), 2);
+                return 12742 * Math.asin(Math.sqrt(a));
+            };
+
+            var ntripMountpointsShow = function(message, colorClass) {
+                if (message) {
+                    $('<span>', {class: 'dropdown-item-text text-' + colorClass, text: message}).appendTo(ntripMountpointsMessage);
+                }
+
+                // Only show headers that have entries under them
+                ntripMountpointsList.find('.dropdown-header').each(function() {
+                    $(this).toggle($(this).next().children().length > 0);
+                });
+
+                ntripMountpointsDropdownButton.trigger('click');
+            };
+
+            ntripMountpointsScanButton.on('click', function() {
+                ntripMountpointsMessage.empty();
+                ntripMountpointsOpenList.empty();
+                ntripMountpointsSecuredList.empty();
+
+                ntripMountpointsScanButton.prop('disabled', true);
+                ntripMountpointsDropdownButton.prop('disabled', true);
+                $.ajax({
+                    url: 'ntrip/sourcetable',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    dataType: 'text',
+                    data: JSON.stringify({
+                        host: form.find('input[name="ntr_cli_host"]').val(),
+                        port: parseInt(form.find('input[name="ntr_cli_port"]').val()),
+                        user: form.find('input[name="ntr_cli_user"]').val(),
+                        pass: form.find('input[name="ntr_cli_pass"]').val()
+                    })
+                }).always(function() {
+                    ntripMountpointsScanButton.prop('disabled', false);
+                    ntripMountpointsDropdownButton.prop('disabled', false);
+                }).done(function(data) {
+                    // STR;mountpoint;identifier;format;format-details;carrier;nav-system;network;country;latitude;longitude;
+                    // nmea;solution;generator;compr-encryp;authentication;fee;bitrate;misc
+                    var mountpoints = data.split(/\r?\n/)
+                        .filter(line => line.startsWith('STR;'))
+                        .map(line => {
+                            var fields = line.split(';');
+                            var lat = parseFloat(fields[9]);
+                            var lon = parseFloat(fields[10]);
+                            var located = isFinite(lat) && isFinite(lon) && (lat !== 0 || lon !== 0);
+                            return {
+                                name: fields[1],
+                                identifier: fields[2],
+                                format: fields[3],
+                                network: fields[7],
+                                country: fields[8],
+                                auth: fields[15],
+                                fee: fields[16],
+                                distance: located && roverPosition ? haversineKm(roverPosition.lat, roverPosition.lon, lat, lon) : null
+                            };
+                        });
+
+                    // Nearest first, stations without a position last, otherwise the caster's order
+                    if (roverPosition) {
+                        mountpoints.sort((a, b) => {
+                            if (a.distance === null || b.distance === null) return (a.distance === null) - (b.distance === null);
+                            return a.distance - b.distance;
+                        });
+                    }
+
+                    mountpoints.forEach(function(mountpoint) {
+                        var entry = $('<a>', {class: 'ntrip-mountpoint dropdown-item', href: 'javascript:void(0);'});
+                        var open = mountpoint.auth === 'N';
+                        entry.data('mountpoint', mountpoint.name);
+                        entry.prop('title', [mountpoint.identifier, mountpoint.network, mountpoint.country].filter(s => s).join(', '));
+
+                        entry.appendText(mountpoint.name + (mountpoint.format ? ' (' + mountpoint.format + ') ' : ' '));
+                        if (mountpoint.fee === 'Y') {
+                            entry.append($('<span>', {class: 'text-warning', text: 'fee '}));
+                        }
+                        if (mountpoint.distance !== null) {
+                            entry.append($('<span>', {class: 'text-muted', text: mountpoint.distance.toFixed(1) + ' km'}));
+                        }
+
+                        entry.appendTo(open ? ntripMountpointsOpenList : ntripMountpointsSecuredList);
+                    });
+
+                    ntripMountpointsList.find('.ntrip-mountpoint').on('click', function() {
+                        ntripMountpointsMpInput.val($(this).data('mountpoint')).trigger('change');
+                    });
+
+                    ntripMountpointsShow(mountpoints.length === 0 ? 'No mountpoints found' : null, 'muted');
+                }).fail(function(xhr) {
+                    ntripMountpointsShow(xhr.responseText || 'Could not get the mountpoint list', 'danger');
+                });
+            });
+
+            // F9P receiver configuration, read from and written to the receiver over the UART
+            var f9pCheckButton = form.find('.f9p-check');
+            var f9pWriteButton = form.find('.f9p-write');
+            var f9pButtons = f9pCheckButton.add(f9pWriteButton);
+            var f9pResultText = form.find('.f9p-result');
+            // UART1 rates a write sets, the RS-232 output can't go faster than these
+            var f9pRates = [['gga', 'GGA', 10], ['vtg', 'VTG', 10], ['rmc', 'RMC', 10], ['gsa', 'GSA', 10], ['gst', 'GST', 10],
+                ['gsv', 'GSV', 1], ['nav_sat', 'NAV-SAT', 1], ['nav_sig', 'NAV-SIG', 1]];
+            var f9pBaud = 460800;
+
+            // Keeps the UART card in step when the ESP32 followed the receiver to another baud rate,
+            // so saving the form doesn't put the old one back
+            var f9pUartBaud = function(data) {
+                var select = form.find('select[name="uart_baud_rate"]');
+                if (data && data.uart_baud && select.find('option[value="' + data.uart_baud + '"]').length > 0) {
+                    select.val(String(data.uart_baud));
+                }
+            };
+
+            // Footer lines, each [text, color class]
+            var f9pShowLines = function(lines) {
+                f9pResultText.empty();
+                lines.forEach(function(line) {
+                    $('<span>', {class: 'd-block text-' + line[1], text: line[0]}).appendTo(f9pResultText);
+                });
+                toggleFooter(f9pResultText);
+            };
+
+            var f9pHz = (hz) => hz === 0 ? 'off' : (Math.round(hz * 100) / 100) + ' Hz';
+
+            // What the receiver has, against what a write sets
+            var f9pShowState = function(ram, flash) {
+                var lines = [];
+                var problems = [];
+
+                if (ram.baud !== f9pBaud) problems.push('UART1 at ' + ram.baud + ' baud instead of ' + f9pBaud);
+                if (!ram.out.nmea) problems.push('UART1 doesn\'t output NMEA, nothing reaches RS-232');
+                if (!ram.out.ubx || ram.nav_sat === 0) problems.push('no NAV-SAT on UART1, no signal view and the satellite count comes from GSA');
+                if (Math.abs(ram.nav_hz - 10) > 0.01) problems.push('measures at ' + f9pHz(ram.nav_hz) + ' instead of 10 Hz');
+
+                var slow = f9pRates.filter((rate) => Math.abs(ram[rate[0]] - rate[2]) > 0.01)
+                    .map((rate) => rate[1] + ' ' + f9pHz(ram[rate[0]]));
+                if (slow.length > 0) problems.push('sends ' + slow.join(', ') + ', RS-232 can\'t go faster than the receiver sends');
+
+                if (problems.length === 0) {
+                    lines.push(['Receiver is set up for RS-232 through the ESP32: UART1 at ' + ram.baud + ' baud, NMEA at ' +
+                        f9pHz(ram.gga) + ', GSV and NAV-SAT/NAV-SIG at ' + f9pHz(ram.nav_sat), 'success']);
+                } else {
+                    lines.push(['Receiver: ' + problems.join('; ') + '. Write the config to fix it.', 'warning']);
+                }
+
+                if (!flash) {
+                    lines.push(['Receiver\'s flash doesn\'t hold these settings, a power cycle may change them', 'warning']);
+                } else {
+                    var differ = f9pRates.filter((rate) => Math.abs(flash[rate[0]] - ram[rate[0]]) > 0.01).map((rate) => rate[1]);
+                    if (flash.baud !== ram.baud) differ.push('UART1 baud');
+                    if (differ.length > 0) {
+                        lines.push(['Saved settings (flash) differ from the active ones: ' + differ.join(', '), 'warning']);
+                    }
+                }
+
+                return lines;
+            };
+            // Reads the receiver into the panel, lines are shown above what was read
+            var f9pRead = function(lines) {
+                lines = lines || [];
+                f9pButtons.prop('disabled', true);
+                f9pShowLines(lines.concat([['Reading the receiver…', 'muted']]));
+
+                $.ajax({
+                    url: 'f9p/config',
+                    dataType: 'json',
+                    timeout: 30000
+                }).always(function() {
+                    f9pButtons.prop('disabled', false);
+                }).done(function(data) {
+                    f9pUartBaud(data);
+                    if (!data.success) {
+                        f9pShowLines(lines.concat([[data.error, 'danger']]));
+                    } else if (!data.ram) {
+                        f9pShowLines(lines.concat([['Receiver did not report all of its settings', 'danger']]));
+                    } else {
+                        f9pShowLines(lines.concat(f9pShowState(data.ram, data.flash)));
+                    }
+                }).fail(function(xhr) {
+                    f9pShowLines(lines.concat([[xhr.responseText || 'Could not reach the ESP32', 'danger']]));
+                });
+            };
+
+            var f9pCheckCount = (layer) => layer.differ + ' differ' + (layer.missing > 0 ? ', ' + layer.missing + ' missing' : '');
+
+            f9pCheckButton.on('click', function() {
+                f9pButtons.prop('disabled', true);
+                f9pShowLines([['Checking every receiver setting…', 'muted']]);
+
+                $.ajax({
+                    url: 'f9p/check',
+                    method: 'POST',
+                    dataType: 'json',
+                    timeout: 120000
+                }).always(function() {
+                    f9pButtons.prop('disabled', false);
+                }).done(function(data) {
+                    f9pUartBaud(data);
+                    if (!data.success) {
+                        f9pShowLines([[data.error, 'danger']]);
+                        return;
+                    }
+
+                    var layers = [['Active', data.ram], ['Saved', data.flash]];
+                    if (layers.every((layer) => layer[1].differ + layer[1].missing === 0)) {
+                        f9pShowLines([['Receiver matches the RS-232 config, active and saved, all ' + data.total + ' keys', 'success']]);
+                        return;
+                    }
+
+                    var lines = [['Receiver differs from the RS-232 config: active ' + f9pCheckCount(data.ram) +
+                        ', saved ' + f9pCheckCount(data.flash) + ' of ' + data.total + ' keys', 'warning']];
+                    layers.forEach(function(layer) {
+                        layer[1].keys.forEach(function(key) {
+                            lines.push([layer[0] + ' ' + key.key + ': expected ' + key.expected + ', receiver ' +
+                                (key.actual === null ? 'missing' : key.actual), 'muted']);
+                        });
+
+                        var unlisted = layer[1].differ + layer[1].missing - layer[1].keys.length;
+                        if (unlisted > 0) lines.push([layer[0] + ': ' + unlisted + ' more not listed', 'muted']);
+                    });
+                    f9pShowLines(lines);
+                }).fail(function(xhr) {
+                    f9pShowLines([[xhr.responseText || 'Could not reach the ESP32', 'danger']]);
+                });
+            });
+
+            f9pWriteButton.on('click', function() {
+                if (!confirm("Write the RS-232 configuration to the F9P?\n\n" +
+                        "This replaces the UART1 and USB configuration saved in the receiver and sets UART1 to 460800 baud, " +
+                        "the ESP32 follows it. UART2 is left as it is. NTRIP corrections to the receiver " +
+                        "pause for a few seconds while it is written.")) return;
+
+                f9pButtons.prop('disabled', true);
+                f9pShowLines([['Writing configuration…', 'muted']]);
+
+                $.ajax({
+                    url: 'f9p/config',
+                    method: 'POST',
+                    dataType: 'json',
+                    timeout: 120000
+                }).always(function() {
+                    f9pButtons.prop('disabled', false);
+                }).done(function(data) {
+                    f9pUartBaud(data);
+                    var keys = data.keys + ' of ' + data.total + ' keys';
+                    var refused = data.rejected.length > 0 ? ', refused ' + data.rejected.join(' ') : '';
+                    var line = data.success ?
+                        ['Written, ' + keys + refused, data.rejected.length > 0 ? 'warning' : 'success'] :
+                        [data.error + ' (' + keys + ' written' + refused + ')', 'danger'];
+
+                    // Show what the receiver ended up with, unless nothing reached it
+                    if (data.keys > 0) {
+                        f9pRead([line]);
+                    } else {
+                        f9pShowLines([line]);
+                    }
+                }).fail(function(xhr) {
+                    f9pShowLines([[xhr.responseText || 'Could not reach the ESP32', 'danger']]);
+                });
+            });
+
+            f9pRead();
+
+            // WiFi Station IP configuration
+            var wifiStaSubnetInput = form.find('input[name="w_sta_subnet"]');
+
+            // WiFi SoftAP IP configuration
+            var wifiApGwInputs = form.find('input[name="w_ap_gw"]');
+            var wifiApGwPrefixText = form.find('.wifi-ap-ip-prefix');
+            var wifiApIpMinInput = form.find('input[name="w_ap_ip_min"]');
+            var wifiApIpMaxInput = form.find('input[name="w_ap_ip_max"]');
+            var wifiApSubnetInput = form.find('select[name="w_ap_subnet"]');
+
+            wifiApSubnetInput.add(wifiApGwInputs).on('change input', function() {
+                const parts = wifiApGwInputs.map((i, el) => Math.max(0, Math.min(255, el.value))).get();
+                const subnet = parseInt(wifiApSubnetInput.children('option:selected').val());
+
+                wifiApGwPrefixText.text(parts.slice(0, 3).join(".") + ".");
+
+                const mask = 255 >> (subnet - 24);
+
+                const d = parts[3];
+                const min = (d & ~mask) + 1;
+                const max = (d | mask) - 1;
+
+                wifiApGwInputs.eq(3).prop('min', min).prop('max', max).toggleClass('is-invalid', d < min || d > max);
+
+                wifiApIpMinInput.val(min);
+                wifiApIpMaxInput.val(max);
+            }).trigger('change');
+
+        });
+
+        function autoTab(target) {
+            var length = target.value.length;
+            if (length >= target.maxLength) {
+                target.value = target.value.slice(-1);
+                var next = target;
+                while (next = next.nextElementSibling) {
+                    if (next == null)
+                        break;
+                    if (next.tagName.toLowerCase() === "input") {
+                        next.focus();
+                        next.select();
+                        break;
+                    }
+                }
+            } else if (length === 0) {
+                var previous = target;
+                while (previous = previous.previousElementSibling) {
+                    if (previous == null)
+                        break;
+                    if (previous.tagName.toLowerCase() === "input") {
+                        previous.focus();
+                        break;
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-light">
+    <div class="container">
+        <div class="pt-5 text-center">
+            <h2>ESP32 RS-232 Config <a id="project-version" href="https://github.com/AOG-silrep/esp-rs232/releases" class="text-muted small"></a> <a id="prerelease-available" class="text-info small" style="display: none">(beta available)</a></h2>
+
+            <p class="lead">Adjust the settings below and then click on "Submit". The device will restart with the new settings applied. If you have adjusted WiFi settings the device may be moved onto a new IP address, or require you to reconnect to its access point.</p>
+            <p><a href="signals.html" class="btn btn-primary">Satellite signals</a></p>
+        </div>
+        <form class="needs-validation" id="form" novalidate>
+            <div class="row mb-1">
+                <div class="col-xl-6">
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            WiFi
+                            <small class="wifi-sta-status"></small>
+                            <div class="custom-control custom-switch d-inline float-right">
+                                <input type="checkbox" name="w_sta_active" value="1" checked class="custom-control-input" id="switch-wifi-sta">
+                                <label class="custom-control-label" for="switch-wifi-sta"></label>
+                            </div>
+                            <div class="d-inline mr-1 float-right">
+                                <input type="color" name="w_sta_color" data-disable-if="#switch-wifi-sta" value="#ffffff" id="color-wifi-sta">
+                            </div>
+                        </div>
+                        <div class="card-body" data-disable-if="#switch-wifi-sta">
+                            <div class="form-row mb-3">
+                                <div class="col-8">
+                                    <label>SSID</label>
+                                    <div class="input-group">
+                                        <input type="text" name="w_sta_ssid" class="wifi-networks-ssid form-control" maxlength="32" required>
+                                        <div class="input-group-append">
+                                            <button type="button" class="wifi-networks-dropdown btn btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-toggle="dropdown" disabled></button>
+                                            <div class="wifi-networks dropdown-menu">
+                                                <h6 class="dropdown-header">Open networks</h6>
+                                                <span class="wifi-networks-open">
+                                                </span>
+                                                <h6 class="dropdown-header">Secured networks</h6>
+                                                <span class="wifi-networks-secured">
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="input-group-append">
+                                            <button type="button" class="wifi-networks-scan btn btn-outline-secondary">Scan</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>Password</label>
+                                    <input type="hidden" name="w_sta_pass" class="wifi-networks-pass-empty" value="" disabled>
+                                    <div class="input-group">
+                                        <input type="password" name="w_sta_pass" class="wifi-networks-pass form-control">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-row mb-3">
+                                <div class="col-4">
+                                    <label class="d-block">Scan mode <small class="text-muted" data-toggle="tooltip" title="In fast scan mode, WiFi channels are scanned sequentially and a connection is made to the first matching SSID.<br><br>In full (all channel) mode, every channel is scanned and if multiple matching SSIDs are found, the one with the strongest signal is chosen, but the process can be significantly slower.<br><br>This is useful in environments where there are a number of APs with the same SSID covering a large area. If you only have a single AP, fast mode is preferred.">?</small></label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-secondary">
+                                            <input type="radio" name="w_sta_scan_mode" value="0" checked> Fast
+                                        </label>
+                                        <label class="btn btn-outline-secondary">
+                                            <input type="radio" name="w_sta_scan_mode" value="1"> Full
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <label class="d-block">Hotspot forward <small class="text-muted" data-toggle="tooltip" title="If enabled, internet traffic from the WiFi hotspot is forwarded the main WiFi connection. Be aware that any device that connects to the hotspot will then have access to both networks, so a password for the hotspot is strongly recommended.">?</small></label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-warning">
+                                            <input type="checkbox" value="1" name="w_sta_ap_fwd"> Forward
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <label class="d-block">IP config <small class="text-muted" data-toggle="tooltip" title="In DHCP mode, IPs will automatically be configured by the network upon successful connection.<br><br>In static mode, the IPs are hardcoded and must be set up correctly for the given WiFi network, but the connection is faster.">?</small></label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-success">
+                                            <input type="radio" name="w_sta_static" value="0" checked> DHCP
+                                        </label>
+                                        <label class="btn btn-outline-warning">
+                                            <input type="radio" name="w_sta_static" value="1"> Static
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div data-disable-if="input[type='radio'][name='w_sta_static']" data-disable-if-condition="[value=0]:checked" class="form-row mb-3">
+                                <div class="col">
+                                    <label>IP address</label>
+                                    <div class="input-group">
+                                        <input type="number" name="w_sta_ip" value="192" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_ip" value="168" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_ip" value="0" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_ip" value="100" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                    </div>
+                                </div>
+                                <div class="col-7">
+                                    <label>Gateway and subnet</label>
+                                    <div class="input-group">
+                                        <input type="number" name="w_sta_gw" value="192" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_gw" value="168" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_gw" value="4" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_gw" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">/</span>
+                                        </div>
+                                        <select name="w_sta_subnet" class="custom-select px-2" required>
+                                            <option value="8">8</option>
+                                            <option value="9">9</option>
+                                            <option value="10">10</option>
+                                            <option value="11">11</option>
+                                            <option value="12">12</option>
+                                            <option value="13">13</option>
+                                            <option value="14">14</option>
+                                            <option value="15">15</option>
+                                            <option value="16">16</option>
+                                            <option value="17">17</option>
+                                            <option value="18">18</option>
+                                            <option value="19">19</option>
+                                            <option value="20">20</option>
+                                            <option value="21">21</option>
+                                            <option value="22">22</option>
+                                            <option value="23">23</option>
+                                            <option value="24" selected>24</option>
+                                            <option value="25">25</option>
+                                            <option value="26">26</option>
+                                            <option value="27">27</option>
+                                            <option value="28">28</option>
+                                            <option value="29">29</option>
+                                            <option value="30">30</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div data-disable-if="input[type='radio'][name='w_sta_static']" data-disable-if-condition="[value=0]:checked" class="form-row mb-3">
+                                <div class="col">
+                                    <label>DNS</label>
+                                    <div class="input-group">
+                                        <input type="number" name="w_sta_dns_a" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_a" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_a" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_a" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>Backup DNS</label>
+                                    <div class="input-group">
+                                        <input type="number" name="w_sta_dns_b" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_b" value="0" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_b" value="0" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_sta_dns_b" value="1" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-1" style="display: none">
+                            <small class="wifi-sta-internet"></small>
+                        </div>
+                    </div>
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            Admin (this page)
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row mb-3">
+                                <div class="col-4">
+                                    <label>Auth method</label>
+                                    <select name="adm_auth" class="custom-select">
+                                        <option value="0" selected>Open</option>
+                                        <option value="1">Hotspot devices only</option>
+                                        <option value="2">Username/password</option>
+                                        <!--<option value="3">Button press</option>-->
+                                    </select>
+                                </div>
+                                <div class="col-4">
+                                    <label>Username</label>
+                                    <input type="text" name="adm_user" data-disable-if="select[name='adm_auth'] > option[value!='2']" data-disable-if-condition=":selected" class="form-control" maxlength="32" required/>
+                                </div>
+                                <div class="col-4">
+                                    <label>Password</label>
+                                    <input type="password" name="adm_pass" data-disable-if="select[name='adm_auth'] > option[value!='2']" data-disable-if-condition=":selected" class="form-control" maxlength="64" required/>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-6">
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            WiFi hotspot
+                            <small class="wifi-ap-status"></small>
+                            <div class="custom-control custom-switch d-inline float-right active">
+                                <input type="checkbox" name="w_ap_active" value="1" checked class="custom-control-input" id="switch-wifi-ap">
+                                <label class="custom-control-label" for="switch-wifi-ap"></label>
+                            </div>
+                            <input type="checkbox" id="status-wifi-ap-active" checked class="d-none">
+                            <div class="d-inline mr-1 float-right">
+                                <input type="color" name="w_ap_color" data-disable-if="#switch-wifi-ap" value="#ffffff" id="color-wifi-ap">
+                            </div>
+                        </div>
+                        <div class="card-body" data-disable-if="#switch-wifi-ap, #status-wifi-ap-active">
+                            <div class="form-row mb-3">
+                                <div class="col-6">
+                                    <label>SSID</label>
+                                    <div class="input-group">
+                                        <input type="text" name="w_ap_ssid" class="form-control" maxlength="32">
+                                        <div class="input-group-append btn-group-toggle" data-toggle="buttons">
+                                            <label class="btn btn-outline-warning">
+                                                <input type="checkbox" name="w_ap_ssid_hid" value="1"> Hidden
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <label>Security</label>
+                                    <div class="input-group">
+                                        <input type="password" name="w_ap_pass" data-disable-if="select[name='w_ap_auth_mode'] > option[value='0']" data-disable-if-condition=":selected" class="form-control" style="flex-grow: 2" >
+                                        <select name="w_ap_auth_mode" class="custom-select">
+                                            <option value="0" selected>Open</option>
+                                            <option value="1">WEP</option>
+                                            <option value="2">WPA-PSK</option>
+                                            <option value="3">WPA2-PSK</option>
+                                            <option value="4">WPA/2-PSK (recommended)</option>
+                                            <option value="4">WPA2 Enterprise</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-row mb-3">
+                                <div class="col-6">
+                                    <label>Gateway and subnet</label>
+                                    <div class="input-group">
+                                        <div class="input-group-prepend">
+                                            <span class="input-group-text px-1">192.168.</span>
+                                        </div>
+                                        <input type="hidden" name="w_ap_gw" value="192">
+                                        <input type="hidden" name="w_ap_gw" value="168">
+                                        <input type="number" name="w_ap_gw" value="4" maxlength="3" min="0" max="255" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">.</span>
+                                        </div>
+                                        <input type="number" name="w_ap_gw" value="1" maxlength="3" min="1" max="254" required class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text px-1">/</span>
+                                        </div>
+                                        <select name="w_ap_subnet" class="custom-select px-2" required>
+                                            <option value="24" selected>24</option>
+                                            <option value="25">25</option>
+                                            <option value="26">26</option>
+                                            <option value="27">27</option>
+                                            <option value="28">28</option>
+                                            <option value="29">29</option>
+                                            <option value="30">30</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>Min/max IP address</label>
+                                    <div class="input-group">
+                                        <div class="input-group-prepend">
+                                            <span class="wifi-ap-ip-prefix input-group-text">192.168.4.</span>
+                                        </div>
+                                        <input type="number" name="w_ap_ip_min" value="1" disabled class="form-control text-center px-1">
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text">-</span>
+                                        </div>
+                                        <input type="number" name="w_ap_ip_max" value="254" disabled class="form-control text-center px-1">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card mb-3 border border-warning">
+                        <div class="card-header">
+                            UART (main communication)
+                            <small class="uart-stats stream-stats" data-stream="uart"></small>
+                            <div class="d-inline float-right">
+                                <a href="javascript:void(0)" id="switch-uart">Configure</a>
+                            </div>
+                        </div>
+                        <div class="card-body" data-disable-if="#switch-uart" data-disable-if-condition=":visible">
+                            <div class="form-row mb-3">
+                                <div class="col-8">
+                                    <label class="d-block">UART controller</label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-secondary active">
+                                            <input type="radio" name="uart_num" value="0" checked> UART&nbsp;0
+                                        </label>
+                                        <label class="btn btn-outline-secondary">
+                                            <input type="radio" name="uart_num" value="1"> UART&nbsp;1
+                                        </label>
+                                        <label class="btn btn-outline-secondary">
+                                            <input type="radio" name="uart_num" value="2"> UART&nbsp;2
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>TX pin</label>
+                                    <input type="number" name="uart_tx_pin" class="form-control" placeholder="1" value="1" required>
+                                </div>
+                                <div class="col">
+                                    <label>RX pin</label>
+                                    <input type="number" name="uart_rx_pin" class="form-control" placeholder="3" value="3" required>
+                                </div>
+                            </div>
+                            <div class="form-row mb-3">
+                                <div class="col-md-4 col-6">
+                                    <label>Baud rate</label>
+                                    <div class="input-group">
+                                        <select name="uart_baud_rate" class="custom-select" required>
+                                            <option value="9600">9600</option>
+                                            <option value="19200">19200</option>
+                                            <option value="38400">38400</option>
+                                            <option value="57600">57600</option>
+                                            <option value="115200">115200</option>
+                                            <option value="230400">230400</option>
+                                            <option value="460800" selected>460800</option>
+                                            <option value="921600">921600</option>
+                                        </select>
+                                        <div class="input-group-append">
+                                            <span class="input-group-text px-2">baud</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md col-6">
+                                    <label>Data bits</label>
+                                    <div class="input-group">
+                                        <select name="uart_data_bits" class="custom-select" required>
+                                            <option value="0">5</option>
+                                            <option value="1">6</option>
+                                            <option value="2">7</option>
+                                            <option value="3" selected>8</option>
+                                        </select>
+                                        <div class="input-group-append">
+                                            <span class="input-group-text px-2">bits</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md col-6">
+                                    <label>Stop bits</label>
+                                    <div class="input-group">
+                                        <select name="uart_stop_bits" class="custom-select" required>
+                                            <option value="1" selected>1</option>
+                                            <option value="2">1.5</option>
+                                            <option value="3">2</option>
+                                        </select>
+                                        <div class="input-group-append">
+                                            <span class="input-group-text px-2">bits</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md col-6">
+                                    <label>Parity</label>
+                                    <select name="uart_parity" class="custom-select px-2" required>
+                                        <option value="0" selected>Disabled</option>
+                                        <option value="2">Even</option>
+                                        <option value="3">Odd</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-3">
+                                    <label class="d-block">Log forward  <small class="text-muted" data-toggle="tooltip" title="If enabled, log messages (normally sent to UART1, and visible on the /log.html page) are forwarded to the main UART, primarily for debugging purposes. This setting can interfere with normal communication over UART0.">?</small></label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-warning">
+                                            <input type="checkbox" value="1" name="uart_log_fwd"> Print
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-5">
+                                    <label class="d-block">Flow control</label>
+                                    <div class="btn-group btn-group-toggle d-flex" data-toggle="buttons">
+                                        <label class="btn btn-outline-success">
+                                            <input type="checkbox" value="1" name="uart_fc_rts"> RTS
+                                        </label>
+                                        <label class="btn btn-outline-primary">
+                                            <input type="checkbox" value="1" name="uart_fc_cts"> CTS
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>RTS pin</label>
+                                    <input type="number" name="uart_rts_pin" data-disable-if="input[type='checkbox'][name='uart_fc_rts']" class="form-control" placeholder="22" value="22" required>
+                                </div>
+                                <div class="col">
+                                    <label>CTS pin</label>
+                                    <input type="number" name="uart_cts_pin" data-disable-if="input[type='checkbox'][name='uart_fc_cts']" class="form-control" placeholder="19" value="19" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-1" style="display: none">
+                            <small class="uart-gps"></small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col">
+                    <input type="submit" class="form-control">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-xl-6">
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            NTRIP client
+                            <small class="ntrip-client-stats stream-stats" data-stream="ntrip_client"></small>
+                            <div class="custom-control custom-switch d-inline float-right">
+                                <input type="checkbox" name="ntr_cli_active" value="1" class="custom-control-input" id="switch-ntrip-client">
+                                <label class="custom-control-label" for="switch-ntrip-client"></label>
+                            </div>
+                            <div class="d-inline mr-1 float-right">
+                                <input type="color" name="ntr_cli_color" data-disable-if="#switch-ntrip-client" value="#ffffff" id="color-ntrip-client">
+                            </div>
+                        </div>
+                        <div class="card-body" data-disable-if="#switch-ntrip-client">
+                            <div class="form-row mb-3">
+                                <div class="col">
+                                    <label>Host and port</label>
+                                    <div class="input-group">
+                                        <input type="text" name="ntr_cli_host" class="form-control" style="flex-grow: 3" required>
+                                        <div class="input-group-append input-group-prepend">
+                                            <span class="input-group-text">:</span>
+                                        </div>
+                                        <input type="number" name="ntr_cli_port" maxlength="5" min="0" max="65535" class="form-control" required>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>Mountpoint</label>
+                                    <div class="input-group">
+                                        <input type="text" name="ntr_cli_mp" class="ntrip-mountpoints-mp form-control" maxlength="32" required>
+                                        <div class="input-group-append">
+                                            <button type="button" class="ntrip-mountpoints-dropdown btn btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-toggle="dropdown" disabled></button>
+                                            <div class="ntrip-mountpoints dropdown-menu dropdown-menu-right" style="max-height: 50vh; overflow-y: auto">
+                                                <span class="ntrip-mountpoints-message">
+                                                </span>
+                                                <h6 class="dropdown-header">Open mountpoints</h6>
+                                                <span class="ntrip-mountpoints-open">
+                                                </span>
+                                                <h6 class="dropdown-header">Login required</h6>
+                                                <span class="ntrip-mountpoints-secured">
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="input-group-append">
+                                            <button type="button" class="ntrip-mountpoints-scan btn btn-outline-secondary" title="Get the mountpoint list from the caster">Scan</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-row mb-3">
+                                <div class="col">
+                                    <label>Username</label>
+                                    <div class="input-group">
+                                        <input type="text" name="ntr_cli_user" class="form-control">
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>Password</label>
+                                    <div class="input-group">
+                                        <input type="password" name="ntr_cli_pass" class="form-control">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-1" style="display: none">
+                            <small class="ntrip-client-rtk"></small>
+                        </div>
+                    </div>
+                    <div id="ota-form">
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                Firmware update
+                            </div>
+                            <div class="card-body">
+                                <div class="form-row mb-3">
+                                    <div class="col">
+                                        <input type="file" name="ota_file" id="ota-file" class="form-control-file" accept=".bin">
+                                    </div>
+                                    <div class="col-auto">
+                                        <button type="button" class="btn btn-primary" id="ota-submit">Update</button>
+                                    </div>
+                                </div>
+                                <div class="progress" id="ota-progress" style="display: none">
+                                    <div class="progress-bar" role="progressbar" id="ota-progress-bar" style="width: 0"></div>
+                                </div>
+                                <div id="ota-error" class="text-danger small mt-2" style="display: none"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            RS-232 output
+                            <small class="rs232-stats stream-stats" data-stream="rs232"></small>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row mb-3">
+                                <div class="col-6">
+                                    <label>Baud rate</label>
+                                    <div class="input-group">
+                                        <select name="rs_baud_rate" class="custom-select" required>
+                                            <option value="4800">4800</option>
+                                            <option value="9600">9600</option>
+                                            <option value="19200">19200</option>
+                                            <option value="38400" selected>38400</option>
+                                            <option value="57600">57600</option>
+                                            <option value="115200">115200</option>
+                                        </select>
+                                        <div class="input-group-append">
+                                            <span class="input-group-text px-2">baud</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label>TX pin <small class="text-muted" data-toggle="tooltip" title="ESP32 UART2 TX into the MAX3232 (T1IN). GPIO17 is the pin marked TX on the HUZZAH32.">?</small></label>
+                                    <input type="number" name="rs_tx_pin" class="form-control" placeholder="17" value="17" min="0" max="33" required>
+                                </div>
+                                <div class="col">
+                                    <label>RX pin</label>
+                                    <input type="number" name="rs_rx_pin" class="form-control" placeholder="16" value="16" min="0" max="39" required>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-12">
+                                    <label class="mb-0">Sentence rates, Hz <small class="text-muted" data-toggle="tooltip" title="The receiver sends every sentence at 10 Hz (GSV at 1 Hz) to the ESP32, which passes each on at the rate picked here. GGA can't be off.">?</small></label>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>GGA</label>
+                                    <select name="rs_gga_hz" class="custom-select rs232-rate" data-sentence="GGA">
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="5">5</option>
+                                        <option value="10" selected>10</option>
+                                    </select>
+                                </div>
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>VTG</label>
+                                    <select name="rs_vtg_hz" class="custom-select rs232-rate" data-sentence="VTG">
+                                        <option value="0">Off</option>
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="5" selected>5</option>
+                                        <option value="10">10</option>
+                                    </select>
+                                </div>
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>RMC</label>
+                                    <select name="rs_rmc_hz" class="custom-select rs232-rate" data-sentence="RMC">
+                                        <option value="0" selected>Off</option>
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="5">5</option>
+                                        <option value="10">10</option>
+                                    </select>
+                                </div>
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>GSA</label>
+                                    <select name="rs_gsa_hz" class="custom-select rs232-rate" data-sentence="GSA">
+                                        <option value="0" selected>Off</option>
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="5">5</option>
+                                        <option value="10">10</option>
+                                    </select>
+                                </div>
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>GST</label>
+                                    <select name="rs_gst_hz" class="custom-select rs232-rate" data-sentence="GST">
+                                        <option value="0" selected>Off</option>
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="5">5</option>
+                                        <option value="10">10</option>
+                                    </select>
+                                </div>
+                                <div class="col-4 col-md-2 mb-2">
+                                    <label>GSV</label>
+                                    <select name="rs_gsv_hz" class="custom-select rs232-rate" data-sentence="GSV">
+                                        <option value="0" selected>Off</option>
+                                        <option value="1">1</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <p class="small mb-3 rs232-estimate"></p>
+                            <div class="form-row">
+                                <div class="col">
+                                    <div class="custom-control custom-switch">
+                                        <input type="checkbox" name="rs_gga_sats" value="1" checked class="custom-control-input" id="switch-rs232-gga-sats">
+                                        <label class="custom-control-label" for="switch-rs232-gga-sats">Real satellite count in GGA <small class="text-muted" data-toggle="tooltip" title="NMEA 0183 GGA stops at 12 satellites. With this on, the GGA satellites field is replaced with the number really used in the fix, from NAV-SAT (or the GSA sentences), and the checksum is recalculated. Turn it off for a device that rejects more than 12.">?</small></label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-1" style="display: none">
+                            <small class="rs232-status"></small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-6">
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            System
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row mb-2 align-items-center cpu-load-row" data-core="0">
+                                <div class="col-auto">
+                                    <label class="mb-0">CPU core 0</label>
+                                </div>
+                                <div class="col">
+                                    <div class="progress">
+                                        <div class="progress-bar cpu-load" role="progressbar" style="width: 0%">0%</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-row mb-3 align-items-center cpu-load-row" data-core="1">
+                                <div class="col-auto">
+                                    <label class="mb-0">CPU core 1</label>
+                                </div>
+                                <div class="col">
+                                    <div class="progress">
+                                        <div class="progress-bar cpu-load" role="progressbar" style="width: 0%">0%</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-6">
+                                    <label class="mb-0">Uptime</label>
+                                    <div class="uptime">loading...</div>
+                                </div>
+                                <div class="col-6">
+                                    <label class="mb-0">Heap</label>
+                                    <div class="heap">loading...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            Log &amp; reset
+                        </div>
+                        <div class="card-body">
+                            <a href="log.html" class="btn btn-primary">View log</a>
+                            <button type="button" class="btn btn-danger mt-2 d-block" id="reset-submit" data-toggle="modal" data-target="#reset-modal">Reset to defaults</button>
+                        </div>
+                    </div>
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            F9P receiver
+                            <small class="text-muted">configured over the UART, Write once after a new receiver or firmware</small>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-3">
+                                F9P UART1 to the ESP32 at 460800&nbsp;baud: GGA, VTG, RMC, GSA and GST at 10&nbsp;Hz, GSV,
+                                NAV-SAT and NAV-SIG at 1&nbsp;Hz. The RS-232 output picks its own rates from these.
+                                USB gets the same NMEA. F9P UART2 is left as it is.
+                                The ESP32 finds the receiver at 460800, 115200, 38400 or 9600&nbsp;baud and follows it to 460800 after a write.
+                            </p>
+                            <div class="form-row">
+                                <div class="col">
+                                    <button type="button" class="f9p-check btn btn-outline-secondary btn-block">Check F9P</button>
+                                </div>
+                                <div class="col">
+                                    <button type="button" class="f9p-write btn btn-outline-warning btn-block">Write to F9P</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-1" style="display: none">
+                            <small class="f9p-result"></small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+    <footer id="footer" class="bg-dark">
+        <div class="container">
+            <div class="text-center text-light">
+                <small>&copy; <a href="http://cvetkovic.ie" class="text-white">Neboj&#353;a Cvetkovi&#263;</a> 2020 - <a href="https://github.com/nebkat/esp32-xbee" class="text-white">Original</a> - <a href="https://github.com/AOG-silrep/esp-rs232" class="text-white">Project</a></small>
+            </div>
+        </div>
+    </footer>
+    <div class="modal fade" id="reset-modal">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4 class="modal-title">Reset to defaults?</h4>
+                </div>
+                <div class="modal-body">
+                    <p>All settings will be returned to their startup defaults and the ESP32 will restart.</p>
+                    <p>The WiFi hotspot settings are <strong>not</strong> changed, so you will still be able to reach this page over the ESP32's own hotspot. Reset those manually if you need to.</p>
+                    <div class="custom-control custom-checkbox">
+                        <input type="checkbox" class="custom-control-input" id="reset-wifi-sta">
+                        <label class="custom-control-label" for="reset-wifi-sta">Also clear the WiFi network (station) name and password</label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-danger" id="reset-confirm">Reset</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="modal fade" id="restarting-modal">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4 class="modal-title">Waiting for restart...</h4>
+                </div>
+                <div class="modal-body">
+                    <p>The ESP32 RS-232 has been restarted to apply the new configuration.</p>
+                    <p>Please wait a few seconds, and this page will automatically reload.</p>
+                    <p>If you have made changes to the WiFi connection, or are using the ESP32's WiFi hotspot, you may need to check your device's WiFi connection, or read the new IP address from a serial terminal.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-danger" onclick="window.location.reload()">Reload</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
